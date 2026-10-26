@@ -23,6 +23,7 @@
 #include <sys/syscall.h>
 #include <sys/time.h>
 #include <unistd.h>
+#include <zstd.h>
 #include "hbldr/hbldr.h"
 
 #ifndef PPLAY_TITLE_ID
@@ -32,6 +33,7 @@
 #define LOADER_NAME     "pplay_loader.elf"
 #define PKG_SUBDIR      "ps5/pplay"
 #define MARKER          PKG_SUBDIR "/pplay.elf"
+#define ZST_EXT         ".zst"
 #define DATA_DIR        "/data/homebrew/pplay"
 #define LIB_DIR         "/user/homebrew/lib"
 
@@ -76,7 +78,38 @@ static int has_marker(const char *app0) {
     char path[PATH_MAX];
     struct stat st;
     snprintf(path, sizeof(path), "%s/%s", app0, MARKER);
+    if (stat(path, &st) == 0 && S_ISREG(st.st_mode)) {
+        return 1;
+    }
+    snprintf(path, sizeof(path), "%s/%s" ZST_EXT, app0, MARKER);
     return stat(path, &st) == 0 && S_ISREG(st.st_mode);
+}
+
+static int is_zst(const char *name) {
+    size_t len = strlen(name), ext = strlen(ZST_EXT);
+    return len > ext && strcmp(name + len - ext, ZST_EXT) == 0;
+}
+
+// unpacked size from the zstd frame header (-1: unknown)
+static long long zst_size(const char *path) {
+    unsigned char head[18]; // ZSTD_FRAMEHEADERSIZE_MAX
+    unsigned long long size;
+    ssize_t n;
+    int fd;
+
+    if ((fd = open(path, O_RDONLY)) < 0) {
+        return -1;
+    }
+    n = read(fd, head, sizeof(head));
+    close(fd);
+    if (n <= 0) {
+        return -1;
+    }
+    size = ZSTD_getFrameContentSize(head, (size_t) n);
+    if (size == ZSTD_CONTENTSIZE_UNKNOWN || size == ZSTD_CONTENTSIZE_ERROR) {
+        return -1;
+    }
+    return (long long) size;
 }
 
 // Package content, mounted while the launcher runs.
@@ -143,18 +176,51 @@ static int mkdirs(const char *path) {
     return is_dir(tmp) ? 0 : -1;
 }
 
-static int same_file(const struct stat *src, const char *dst) {
+// size: of the destination, -1 to only compare the mtime
+static int same_file(const struct stat *src, long long size, const char *dst) {
     struct stat st;
     if (stat(dst, &st) != 0) {
         return 0;
     }
-    return st.st_size == src->st_size && st.st_mtime == src->st_mtime;
+    return (size < 0 || st.st_size == size) && st.st_mtime == src->st_mtime;
+}
+
+static void set_mtime(const char *path, const struct stat *st) {
+    struct timeval times[2];
+    times[0].tv_sec = st->st_atime;
+    times[0].tv_usec = 0;
+    times[1].tv_sec = st->st_mtime;
+    times[1].tv_usec = 0;
+    utimes(path, times);
+}
+
+static int replace_file(const char *tmp, const char *dst) {
+    if (rename(tmp, dst) != 0) {
+        unlink(dst);
+        if (rename(tmp, dst) != 0) {
+            unlink(tmp);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int write_all(int fd, const void *data, size_t size) {
+    const char *p = data;
+    while (size > 0) {
+        ssize_t w = write(fd, p, size);
+        if (w <= 0) {
+            return -1;
+        }
+        p += w;
+        size -= (size_t) w;
+    }
+    return 0;
 }
 
 static int copy_file(const char *src, const char *dst, const struct stat *st) {
     char tmp[PATH_MAX];
     static char buf[1024 * 1024];
-    struct timeval times[2];
     ssize_t n;
     int in, out;
 
@@ -168,17 +234,11 @@ static int copy_file(const char *src, const char *dst, const struct stat *st) {
     }
 
     while ((n = read(in, buf, sizeof(buf))) > 0) {
-        char *p = buf;
-        while (n > 0) {
-            ssize_t w = write(out, p, (size_t) n);
-            if (w <= 0) {
-                close(in);
-                close(out);
-                unlink(tmp);
-                return -1;
-            }
-            p += w;
-            n -= w;
+        if (write_all(out, buf, (size_t) n) != 0) {
+            close(in);
+            close(out);
+            unlink(tmp);
+            return -1;
         }
     }
     close(in);
@@ -188,21 +248,61 @@ static int copy_file(const char *src, const char *dst, const struct stat *st) {
     }
 
     // keep the package mtime, so unchanged files are skipped next time
-    times[0].tv_sec = st->st_atime;
-    times[0].tv_usec = 0;
-    times[1].tv_sec = st->st_mtime;
-    times[1].tv_usec = 0;
-    utimes(tmp, times);
+    set_mtime(tmp, st);
+    return replace_file(tmp, dst);
+}
 
-    if (rename(tmp, dst) != 0) {
-        unlink(dst);
-        if (rename(tmp, dst) != 0) {
-            unlink(tmp);
-            return -1;
-        }
+static int unpack_file(const char *src, const char *dst, const struct stat *st) {
+    char tmp[PATH_MAX];
+    static char in_buf[1024 * 1024];
+    static char out_buf[1024 * 1024];
+    ZSTD_DCtx *dctx;
+    size_t ret = 1;
+    ssize_t n = 0;
+    int in, out, err = 0;
+
+    snprintf(tmp, sizeof(tmp), "%s.tmp", dst);
+    if (!(dctx = ZSTD_createDCtx())) {
+        errno = ENOMEM;
+        return -1;
+    }
+    if ((in = open(src, O_RDONLY)) < 0) {
+        ZSTD_freeDCtx(dctx);
+        return -1;
+    }
+    if ((out = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0777)) < 0) {
+        close(in);
+        ZSTD_freeDCtx(dctx);
+        return -1;
     }
 
-    return 0;
+    while (!err && (n = read(in, in_buf, sizeof(in_buf))) > 0) {
+        ZSTD_inBuffer input = {in_buf, (size_t) n, 0};
+        while (input.pos < input.size) {
+            ZSTD_outBuffer output = {out_buf, sizeof(out_buf), 0};
+            ret = ZSTD_decompressStream(dctx, &output, &input);
+            if (ZSTD_isError(ret) || write_all(out, out_buf, output.pos) != 0) {
+                err = 1;
+                break;
+            }
+        }
+    }
+    close(in);
+    ZSTD_freeDCtx(dctx);
+    // ret != 0: truncated frame
+    if (err || n < 0 || ret != 0) {
+        close(out);
+        unlink(tmp);
+        errno = EIO;
+        return -1;
+    }
+    if (close(out) != 0) {
+        unlink(tmp);
+        return -1;
+    }
+
+    set_mtime(tmp, st);
+    return replace_file(tmp, dst);
 }
 
 static int sync_tree(const char *src, const char *dst, int *copied) {
@@ -230,15 +330,25 @@ static int sync_tree(const char *src, const char *dst, int *copied) {
         }
         if (S_ISDIR(st.st_mode)) {
             ret = sync_tree(s, d, copied);
-        } else if (S_ISREG(st.st_mode) && !same_file(&st, d)) {
-            if (*copied == 0) {
-                notify("pPlay: updating files, please wait...");
-            }
-            if (copy_file(s, d, &st) != 0) {
-                ret = fail("can't copy %s (%s)", d, strerror(errno));
-            } else {
-                (*copied)++;
-            }
+            continue;
+        }
+        if (!S_ISREG(st.st_mode)) {
+            continue;
+        }
+        int packed = is_zst(e->d_name);
+        if (packed) {
+            d[strlen(d) - strlen(ZST_EXT)] = 0;
+        }
+        if (same_file(&st, packed ? zst_size(s) : st.st_size, d)) {
+            continue;
+        }
+        if (*copied == 0) {
+            notify("pPlay: updating files, please wait...");
+        }
+        if ((packed ? unpack_file(s, d, &st) : copy_file(s, d, &st)) != 0) {
+            ret = fail("can't %s %s (%s)", packed ? "unpack" : "copy", d, strerror(errno));
+        } else {
+            (*copied)++;
         }
     }
 
@@ -267,7 +377,7 @@ static int install_libs(const char *src_dir, int *copied) {
         }
         snprintf(s, sizeof(s), "%s/%s", src_dir, e->d_name);
         snprintf(d, sizeof(d), "%s/%s", LIB_DIR, e->d_name);
-        if (stat(s, &st) != 0 || !S_ISREG(st.st_mode) || same_file(&st, d)) {
+        if (stat(s, &st) != 0 || !S_ISREG(st.st_mode) || same_file(&st, st.st_size, d)) {
             continue;
         }
         if (mkdirs(LIB_DIR) != 0) {

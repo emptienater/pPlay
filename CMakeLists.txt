@@ -233,7 +233,7 @@ elseif (PLATFORM_PS5)
     add_executable(pplay_loader ps5/loader/loader.c
         ps5/loader/hbldr/hbldr.c ps5/loader/hbldr/elfldr.c ps5/loader/hbldr/pt.c)
     set_target_properties(pplay_loader PROPERTIES SUFFIX ".elf")
-    target_link_libraries(pplay_loader kernel_sys SceSystemService SceUserService)
+    target_link_libraries(pplay_loader zstd kernel_sys SceSystemService SceUserService)
     target_compile_definitions(pplay_loader PRIVATE PPLAY_TITLE_ID="${PS5_PKG_TITLE_ID}")
 elseif (PLATFORM_LINUX)
     list(APPEND PLATFORM_LIBS mbedtls mbedcrypto)

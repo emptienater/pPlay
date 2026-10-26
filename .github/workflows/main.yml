@@ -319,6 +319,7 @@ jobs:
         run: |
           cd cmake-build
           make pplay_ps5_release pplay_loader -j$(nproc) VERBOSE=1
+          strip --strip-unneeded release/pplay/libOSMesa.so.8
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -349,7 +350,7 @@ jobs:
       - name: Create build environment
         run: |
           sudo apt-get update || true
-          sudo apt-get install -y pacman-package-manager libarchive-tools cmake make
+          sudo apt-get install -y pacman-package-manager libarchive-tools cmake make zstd
 
           sudo tee -a /etc/pacman.conf > /dev/null <<TEXT
           [pacbrew]
@@ -379,7 +380,9 @@ jobs:
           cp -r data/ps4/romfs/sce_sys data/ps4/romfs/sce_module "${PKG_ROOT}/"
           cp -r ps5-input/release/pplay "${PKG_ROOT}/ps5/pplay"
           cp ps5-input/pplay_loader.elf "${PKG_ROOT}/ps5/"
+          find "${PKG_ROOT}/ps5/pplay" -type f -size +1M ! -name '*.zst' -exec zstd -19 -T0 -q --rm {} \;
           find "${PKG_ROOT}" -type f | sort
+          du -sh "${PKG_ROOT}"
 
           cmake -S ps5/launcher -B build-launcher \
             -DCMAKE_TOOLCHAIN_FILE=${OPENORBIS}/cmake/ps4.cmake \

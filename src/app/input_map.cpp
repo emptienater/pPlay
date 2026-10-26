@@ -205,6 +205,7 @@ namespace {
     // other devices auto repeat, with a debounce (CEC remotes may report a held key
     // as quick release/press)
 #define DEBOUNCE_MS 120
+#define STICK_DEADZONE 16000
 #define MIRROR_MS 400
     c2d::C2DClock *g_mirrorClock = nullptr;
     int g_mainLastMs[32] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
@@ -284,6 +285,9 @@ namespace pplay::InputMap {
 #ifndef NO_KEYBOARD
         input->setKeyboardMapping(g_keyboard);
 #endif
+        for (int i = 0; i < PLAYER_MAX; i++) {
+            input->getPlayer(i)->dz = STICK_DEADZONE;
+        }
         SDL_AddEventWatch(onEvent, nullptr);
         scanDevices();
     }

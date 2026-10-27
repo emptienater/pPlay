@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <sstream>
+#include <fstream>
+#include <string>
 #include "main.h"
 #include "player.h"
 #include "torrserve.h"
@@ -124,7 +126,9 @@ bool Player::load(const MediaFile &f, bool firstTry, const std::string &options)
         + " type=" + std::to_string((int) file.type)
         + " firstTry=" + std::to_string(firstTry ? 1 : 0)
         + " retryCount=" + std::to_string(retryCount));
+
     std::string path = pplay::TorrServe::toStreamUrl(file.path);
+
 #ifdef __SMB2__
     if (Utility::startWith(path, "smb://")) {
         std::replace(path.begin(), path.end(), '\\', '/');
@@ -132,6 +136,20 @@ bool Player::load(const MediaFile &f, bool firstTry, const std::string &options)
         opts += ",hr-seek=no";
     }
 #endif
+
+    // ---- NEW: wrap network media in a tiny M3U8 to force the HLS demuxer ----
+    if (needsM3u8Wrapper(path)) {
+        std::string wrapped = makeM3u8Wrapper(path);
+        if (!wrapped.empty()) {
+            pplay::Utility::log(pplay::Utility::LogLevel::Debug,
+                "Player::load wrapped URL into M3U8: " + wrapped);
+            path = wrapped;
+        } else {
+            pplay::Utility::log(pplay::Utility::LogLevel::Error,
+                "Player::load failed to create M3U8 wrapper, using original URL");
+        }
+    }
+    // -------------------------------------------------------------------------
 
     // disable subtitles if slang option not set in "mpv.conf" (overridden by "watch_later")
     char *slang = mpv_get_property_string(mpv->getHandle(), "slang");
@@ -142,7 +160,9 @@ bool Player::load(const MediaFile &f, bool firstTry, const std::string &options)
 
     pplay::Utility::log(pplay::Utility::LogLevel::Debug,
         "Player::load effective_url=" + path);
+
     int res = mpv->load(path, Mpv::LoadType::Replace, opts);
+
     if (res != 0) {
         pplay::Utility::log(pplay::Utility::LogLevel::Error,
             "Player::load error code=" + std::to_string(res)
@@ -159,6 +179,53 @@ bool Player::load(const MediaFile &f, bool firstTry, const std::string &options)
     main->getStatusBar()->setVisibility(Visibility::Visible, true);
 
     return true;
+}
+
+// Returns true if this URL should be wrapped in an M3U8.
+// We wrap network streams (WebDAV/HTTP/FTP) that aren't already playlists.
+static bool needsM3u8Wrapper(const std::string &path) {
+    // Already an M3U8 — don't wrap again.
+    auto endsWith = [](const std::string &s, const std::string &suf) {
+        return s.size() >= suf.size() &&
+               s.compare(s.size() - suf.size(), suf.size(), suf) == 0;
+    };
+    if (endsWith(path, ".m3u8") || endsWith(path, ".M3U8")) return false;
+
+    // Only wrap remote URLs; leave local paths alone.
+    if (path.rfind("http://", 0) == 0 ||
+        path.rfind("https://", 0) == 0 ||
+        path.rfind("ftp://", 0) == 0 ||
+        path.rfind("smb2://", 0) == 0) {
+        return true;
+    }
+    return false;
+}
+
+// Writes a minimal M3U8 wrapper around `url` to a temp file and returns its path.
+// Returns an empty string on failure.
+static std::string makeM3u8Wrapper(const std::string &url) {
+    // On PS4, /data/pplay/ is writable; on other platforms /tmp works.
+    const char *candidates[] = {
+        "/data/pplay/tmp_wrapper.m3u8"
+    };
+
+    // MPV's HLS demuxer needs the URI on its own line, with an EXTINF before it.
+    // A large EXTINF is fine; MPV probes the real duration from the stream.
+    std::string content =
+        "#EXTM3U\n"
+        "#EXT-X-VERSION:4\n"
+        "#EXT-X-TARGETDURATION:3600\n"
+        "#EXTINF:3600.0,\n" + url + "\n" +
+        "#EXT-X-ENDLIST\n";
+
+    for (const char *p : candidates) {
+        std::ofstream out(p, std::ios::binary | std::ios::trunc);
+        if (!out.is_open()) continue;
+        out.write(content.data(), (std::streamsize) content.size());
+        out.close();
+        if (out) return std::string(p);
+    }
+    return std::string();
 }
 
 void Player::onLoadEvent() {

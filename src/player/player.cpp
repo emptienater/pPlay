@@ -139,6 +139,20 @@ bool Player::load(const MediaFile &f, bool firstTry, const std::string &options)
 
     // ---- Wrap network media in an M3U8 with credentials supplied as a header ----
     if (needsM3u8Wrapper(path)) {
+    // Drop pause=yes — it makes MPV stop immediately after load
+    auto dropOpt = [](std::string &s, const std::string &opt) {
+        std::string needle = opt + ",";
+        size_t p;
+        while ((p = s.find(needle)) != std::string::npos) s.erase(p, needle.size());
+        if (s == opt) s.clear();
+        if (s.rfind(opt + ",", 0) == 0) s.erase(0, opt.size() + 1);
+        if (s.size() >= opt.size() &&
+            s.compare(s.size() - opt.size(), opt.size(), opt) == 0 &&
+            (s.size() == opt.size() || s[s.size() - opt.size() - 1] == ','))
+            s.erase(s.size() - opt.size() - (s.size() > opt.size() ? 1 : 0));
+    };
+    dropOpt(opts, "pause=yes");
+
         std::string wrapped = makeM3u8WrapperWithAuth(path, opts);
         if (!wrapped.empty()) {
             pplay::Utility::log(pplay::Utility::LogLevel::Debug,

@@ -84,6 +84,8 @@ public:
     const std::vector<MediaFile> &getAutoplayFiles() const;
 
     bool onInput(c2d::Input::Player *players) override;
+    std::string makeM3u8Wrapper(const std::string &url);
+    bool needsM3u8Wrapper(const std::string &path);
 
 private:
 

@@ -183,7 +183,7 @@ bool Player::load(const MediaFile &f, bool firstTry, const std::string &options)
 
 // Returns true if this URL should be wrapped in an M3U8.
 // We wrap network streams (WebDAV/HTTP/FTP) that aren't already playlists.
-static bool needsM3u8Wrapper(const std::string &path) {
+bool Player::needsM3u8Wrapper(const std::string &path) {
     // Already an M3U8 — don't wrap again.
     auto endsWith = [](const std::string &s, const std::string &suf) {
         return s.size() >= suf.size() &&
@@ -203,7 +203,7 @@ static bool needsM3u8Wrapper(const std::string &path) {
 
 // Writes a minimal M3U8 wrapper around `url` to a temp file and returns its path.
 // Returns an empty string on failure.
-static std::string makeM3u8Wrapper(const std::string &url) {
+std::string Player::makeM3u8Wrapper(const std::string &url) {
     // On PS4, /data/pplay/ is writable; on other platforms /tmp works.
     const char *candidates[] = {
         "/data/pplay/tmp_wrapper.m3u8"

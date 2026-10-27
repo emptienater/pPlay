@@ -828,3 +828,84 @@ MenuVideoSubmenu *Player::getMenuAudioStreams() {
 MenuVideoSubmenu *Player::getMenuSubtitlesStreams() {
     return menuSubtitlesStreams;
 }
+
+
+MenuVideoSubmenu *Player::getMenuPlaylist() {
+    return menuPlaylist;
+}
+
+MenuVideoSubmenu *Player::getMenuPlaybackMode() {
+    return menuPlaybackMode;
+}
+
+const std::string &Player::getTitle() const {
+    if (isPlaylistFile()) {
+        displayTitle = mpv->getPlaylistCurrentTitle();
+        if (displayTitle.empty()) {
+            displayTitle = file.name;
+        }
+        displayTitle = "#" + std::to_string(mpv->getPlaylistPos() + 1)
+            + ". " + displayTitle;
+    } else {
+        displayTitle = file.name;
+    }
+    return displayTitle;
+}
+
+bool Player::hasVideo() const {
+    return !file.mediaInfo.videos.empty();
+}
+
+bool Player::isPlaylistFile() const {
+    return file.name.size() >= 4 &&
+        (file.name.compare(file.name.size() - 4, 4, ".m3u") == 0 ||
+         file.name.compare(file.name.size() - 5, 5, ".m3u8") == 0);
+}
+
+const std::vector<MediaFile> &Player::getAutoplayFiles() const {
+    return autoplayFiles;
+}
+
+PlayerOSD *Player::getOSD() {
+    return osd;
+}
+
+Mpv *Player::getMpv() {
+    return mpv;
+}
+
+void Player::applyConfig() {
+    const int timeout = main->getConfig()->getOption(OPT_NETWORK_TIMEOUT)->getInteger();
+#ifdef __SMB2__
+    configure_smb_mpv(main->getConfig()->getOption(OPT_SMB_READ_BUFFER_MB)->getInteger(), timeout);
+#endif
+    mpv_command_string(mpv->getHandle(), ("set network-timeout " + std::to_string(timeout)).c_str());
+    texture->setOutlineColor(COLOR_ACCENT);
+}
+
+void Player::onMediaKeys(unsigned int keys) {
+    if (mpv->isStopped()) {
+        return;
+    }
+    const float seekShort = main->getConfig()->getOption(OPT_SEEK_SHORT_SEC)->getFloat();
+    const float seekLong = main->getConfig()->getOption(OPT_SEEK_LONG_SEC)->getFloat();
+
+    if (keys & pplay::InputMap::PlayPause) {
+        bool paused = mpv->isPaused();
+        main->getStatus()->show("Info...", paused ? "Resuming playback..." : "Pausing playback...");
+        paused ? resume() : pause();
+        osd->btn_play->setVisibility(paused ? Visibility::Hidden : Visibility::Visible);
+        osd->btn_pause->setVisibility(paused ? Visibility::Visible : Visibility::Hidden);
+    } else if (keys & pplay::InputMap::Stop) {
+        main->getStatus()->show("Info...", "Stopping playback...");
+        stop();
+    } else if (keys & (pplay::InputMap::FastForward | pplay::InputMap::Rewind)) {
+        osd->setVisibility(Visibility::Visible, true);
+        mpv->seek((keys & pplay::InputMap::Rewind) ? -seekShort : seekShort);
+    } else if (keys & (pplay::InputMap::Next | pplay::InputMap::Previous)) {
+        osd->setVisibility(Visibility::Visible, true);
+        mpv->seek((keys & pplay::InputMap::Previous) ? -seekLong : seekLong);
+    } else if (keys & (pplay::InputMap::VolumeUp | pplay::InputMap::VolumeDown)) {
+        changeVolume((keys & pplay::InputMap::VolumeUp) ? 1 : -1);
+    }
+}

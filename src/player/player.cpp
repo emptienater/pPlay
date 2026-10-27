@@ -164,21 +164,25 @@ bool Player::load(const MediaFile &f, bool firstTry, const std::string &options)
     }
 #endif
 
-    // ---- Wrap network media in an M3U8 with credentials supplied as a header ----
-    if (needsM3u8Wrapper(path)) {
-        // pause=yes makes mpv halt immediately after load; drop it here.
-        removeOpt(opts, "pause=yes");
-
-        std::string wrapped = makeM3u8WrapperWithAuth(path, opts);
-        if (!wrapped.empty()) {
-            pplay::Utility::log(pplay::Utility::LogLevel::Debug,
-                "Player::load wrapped URL into M3U8: " + wrapped
-                + " opts=" + opts);
-            path = wrapped;
-        } else {
-            pplay::Utility::log(pplay::Utility::LogLevel::Error,
-                "Player::load failed to create M3U8 wrapper, using original URL");
+    // ---- HTTP Basic auth: strip userinfo from URL, apply header on mpv ----
+    // The header is set on the mpv handle (not via loadfile opts) so that it
+    // applies to the main request AND to any sub-requests mpv makes (e.g. for
+    // segments/HLS child playlists). Setting it via loadfile opts only covers
+    // the first URL, which is why the M3U8 wrapper approach played the playlist
+    // but failed to fetch the actual media segment (401 -> reason=5, duration=0).
+    std::string cleanUrl, authUser, authPass;
+    if (needsM3u8Wrapper(path) && splitUserInfo(path, cleanUrl, authUser, authPass)) {
+        std::string header = "Authorization: Basic "
+                           + base64Encode(authUser + ":" + authPass);
+        mpv_set_option_string(mpv->getHandle(), "http-header-fields", "");
+        int r = mpv_set_option_string(mpv->getHandle(), "http-header-fields", header.c_str());
+        if (r < 0) {
+            const char *cmd[] = {"set", "http-header-fields", header.c_str(), nullptr};
+            mpv_command(mpv->getHandle(), cmd);
         }
+        pplay::Utility::log(pplay::Utility::LogLevel::Debug,
+            "Player::load auth: header installed, path=" + cleanUrl + " auth data: " + )base64Encode(authUser + ":" + authPass);
+        path = cleanUrl;
     }
     // -------------------------------------------------------------------------
 

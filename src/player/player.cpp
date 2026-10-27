@@ -99,6 +99,33 @@ bool Player::isPlaying(const std::string &path) {
     return !playingKey.empty() && !path.empty() && playingKeyOf(path) == playingKey;
 }
 
+// Remove a single "opt" or "opt,..." / ",opt" occurrence from a comma separated opts string.
+static void removeOpt(std::string &opts, const std::string &opt) {
+    // Build the list of tokens, drop the matching one, join back.
+    std::vector<std::string> tokens;
+    std::string cur;
+    for (char c : opts) {
+        if (c == ',') {
+            if (!cur.empty()) tokens.push_back(cur);
+            cur.clear();
+        } else {
+            cur += c;
+        }
+    }
+    if (!cur.empty()) tokens.push_back(cur);
+
+    std::string out;
+    for (auto &t : tokens) {
+        // Exact match "pause=yes" or prefix match "pause=..." for the pause option.
+        bool match = (t == opt);
+        if (!match && opt == "pause=yes" && t.rfind("pause=", 0) == 0) match = true;
+        if (match) continue;
+        if (!out.empty()) out += ",";
+        out += t;
+    }
+    opts = out;
+}
+
 bool Player::load(const MediaFile &f, bool firstTry, const std::string &options) {
     stop();
     file = f;
@@ -139,19 +166,8 @@ bool Player::load(const MediaFile &f, bool firstTry, const std::string &options)
 
     // ---- Wrap network media in an M3U8 with credentials supplied as a header ----
     if (needsM3u8Wrapper(path)) {
-    // Drop pause=yes — it makes MPV stop immediately after load
-    auto dropOpt = [](std::string &s, const std::string &opt) {
-        std::string needle = opt + ",";
-        size_t p;
-        while ((p = s.find(needle)) != std::string::npos) s.erase(p, needle.size());
-        if (s == opt) s.clear();
-        if (s.rfind(opt + ",", 0) == 0) s.erase(0, opt.size() + 1);
-        if (s.size() >= opt.size() &&
-            s.compare(s.size() - opt.size(), opt.size(), opt) == 0 &&
-            (s.size() == opt.size() || s[s.size() - opt.size() - 1] == ','))
-            s.erase(s.size() - opt.size() - (s.size() > opt.size() ? 1 : 0));
-    };
-    dropOpt(opts, "pause=yes");
+        // pause=yes makes mpv halt immediately after load; drop it here.
+        removeOpt(opts, "pause=yes");
 
         std::string wrapped = makeM3u8WrapperWithAuth(path, opts);
         if (!wrapped.empty()) {
@@ -172,6 +188,7 @@ bool Player::load(const MediaFile &f, bool firstTry, const std::string &options)
         printf("slang not set, disabling subtitles by default");
         mpv_set_option_string(mpv->getHandle(), "sid", "no");
     }
+    mpv_free(slang);
 
     pplay::Utility::log(pplay::Utility::LogLevel::Debug,
         "Player::load effective_url=" + path);
@@ -258,8 +275,16 @@ std::string Player::makeM3u8WrapperWithAuth(const std::string &url,
                                            std::string &optsOut) {
     std::string cleanUrl = url, user, pass;
     if (splitUserInfo(url, cleanUrl, user, pass)) {
-        optsOut += ",http-header-fields=Authorization: Basic "
-                 + base64Encode(user + ":" + pass);
+        // IMPORTANT: the header value contains a space ("Basic <b64>"). mpv's
+        // option parser tokenises opts on commas, and each "key=value" value
+        // must be quoted if it contains spaces or special characters. Without
+        // the quotes, mpv parses "Authorization:" and "Basic" as separate
+        // tokens, produces an invalid/empty Authorization header, the server
+        // answers 401 and mpv aborts the load (reason=4, duration=0).
+        std::string header = "Authorization: Basic " + base64Encode(user + ":" + pass);
+        if (!optsOut.empty() && optsOut.back() == ',') optsOut.pop_back();
+        if (!optsOut.empty()) optsOut += ",";
+        optsOut += "http-header-fields=\"" + header + "\"";
     }
 
     const char *candidates[] = {
@@ -642,7 +667,7 @@ bool Player::onInput(c2d::Input::Player *players) {
         if (keys & Input::Y)
             changeBrightness(delta);
         else changeVolume(delta);
-    } 
+    }
 
     if (osd->isVisible()) {
         return C2DObject::onInput(players);
@@ -802,84 +827,4 @@ MenuVideoSubmenu *Player::getMenuAudioStreams() {
 
 MenuVideoSubmenu *Player::getMenuSubtitlesStreams() {
     return menuSubtitlesStreams;
-}
-
-MenuVideoSubmenu *Player::getMenuPlaylist() {
-    return menuPlaylist;
-}
-
-MenuVideoSubmenu *Player::getMenuPlaybackMode() {
-    return menuPlaybackMode;
-}
-
-const std::string &Player::getTitle() const {
-    if (isPlaylistFile()) {
-        displayTitle = mpv->getPlaylistCurrentTitle();
-        if (displayTitle.empty()) {
-            displayTitle = file.name;
-        }
-        displayTitle = "#" + std::to_string(mpv->getPlaylistPos() + 1)
-            + ". " + displayTitle;
-    } else {
-        displayTitle = file.name;
-    }
-    return displayTitle;
-}
-
-bool Player::hasVideo() const {
-    return !file.mediaInfo.videos.empty();
-}
-
-bool Player::isPlaylistFile() const {
-    return file.name.size() >= 4 &&
-        (file.name.compare(file.name.size() - 4, 4, ".m3u") == 0 ||
-         file.name.compare(file.name.size() - 5, 5, ".m3u8") == 0);
-}
-
-const std::vector<MediaFile> &Player::getAutoplayFiles() const {
-    return autoplayFiles;
-}
-
-PlayerOSD *Player::getOSD() {
-    return osd;
-}
-
-Mpv *Player::getMpv() {
-    return mpv;
-}
-
-void Player::applyConfig() {
-    const int timeout = main->getConfig()->getOption(OPT_NETWORK_TIMEOUT)->getInteger();
-#ifdef __SMB2__
-    configure_smb_mpv(main->getConfig()->getOption(OPT_SMB_READ_BUFFER_MB)->getInteger(), timeout);
-#endif
-    mpv_command_string(mpv->getHandle(), ("set network-timeout " + std::to_string(timeout)).c_str());
-    texture->setOutlineColor(COLOR_ACCENT);
-}
-
-void Player::onMediaKeys(unsigned int keys) {
-    if (mpv->isStopped()) {
-        return;
-    }
-    const float seekShort = main->getConfig()->getOption(OPT_SEEK_SHORT_SEC)->getFloat();
-    const float seekLong = main->getConfig()->getOption(OPT_SEEK_LONG_SEC)->getFloat();
-
-    if (keys & pplay::InputMap::PlayPause) {
-        bool paused = mpv->isPaused();
-        main->getStatus()->show("Info...", paused ? "Resuming playback..." : "Pausing playback...");
-        paused ? resume() : pause();
-        osd->btn_play->setVisibility(paused ? Visibility::Hidden : Visibility::Visible);
-        osd->btn_pause->setVisibility(paused ? Visibility::Visible : Visibility::Hidden);
-    } else if (keys & pplay::InputMap::Stop) {
-        main->getStatus()->show("Info...", "Stopping playback...");
-        stop();
-    } else if (keys & (pplay::InputMap::FastForward | pplay::InputMap::Rewind)) {
-        osd->setVisibility(Visibility::Visible, true);
-        mpv->seek((keys & pplay::InputMap::Rewind) ? -seekShort : seekShort);
-    } else if (keys & (pplay::InputMap::Next | pplay::InputMap::Previous)) {
-        osd->setVisibility(Visibility::Visible, true);
-        mpv->seek((keys & pplay::InputMap::Previous) ? -seekLong : seekLong);
-    } else if (keys & (pplay::InputMap::VolumeUp | pplay::InputMap::VolumeDown)) {
-        changeVolume((keys & pplay::InputMap::VolumeUp) ? 1 : -1);
-    }
 }

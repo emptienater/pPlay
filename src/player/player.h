@@ -90,6 +90,7 @@ public:
     std::string base64Encode(const std::string &in);
     bool splitUserInfo(const std::string &in, std::string &cleanUrl,
                           std::string &user, std::string &pass);
+    void removeOpt(std::string &opts, const std::string &opt);
 
 private:
 

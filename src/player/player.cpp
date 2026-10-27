@@ -100,7 +100,7 @@ bool Player::isPlaying(const std::string &path) {
 }
 
 // Remove a single "opt" or "opt,..." / ",opt" occurrence from a comma separated opts string.
-static void removeOpt(std::string &opts, const std::string &opt) {
+void Player::removeOpt(std::string &opts, const std::string &opt) {
     // Build the list of tokens, drop the matching one, join back.
     std::vector<std::string> tokens;
     std::string cur;

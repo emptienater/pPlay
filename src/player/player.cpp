@@ -181,7 +181,7 @@ bool Player::load(const MediaFile &f, bool firstTry, const std::string &options)
             mpv_command(mpv->getHandle(), cmd);
         }
         pplay::Utility::log(pplay::Utility::LogLevel::Debug,
-            "Player::load auth: header installed, path=" + cleanUrl + " auth data: " + base64Encode(authUser + ":" + authPass);
+            "Player::load auth: header installed, path=" + cleanUrl + " auth data: " + base64Encode(authUser + ":" + authPass));
         path = cleanUrl;
     }
     // -------------------------------------------------------------------------

@@ -137,12 +137,13 @@ bool Player::load(const MediaFile &f, bool firstTry, const std::string &options)
     }
 #endif
 
-    // ---- NEW: wrap network media in a tiny M3U8 to force the HLS demuxer ----
+    // ---- Wrap network media in an M3U8 with credentials supplied as a header ----
     if (needsM3u8Wrapper(path)) {
-        std::string wrapped = makeM3u8Wrapper(path);
+        std::string wrapped = makeM3u8WrapperWithAuth(path, opts);
         if (!wrapped.empty()) {
             pplay::Utility::log(pplay::Utility::LogLevel::Debug,
-                "Player::load wrapped URL into M3U8: " + wrapped);
+                "Player::load wrapped URL into M3U8: " + wrapped
+                + " opts=" + opts);
             path = wrapped;
         } else {
             pplay::Utility::log(pplay::Utility::LogLevel::Error,
@@ -194,28 +195,67 @@ bool Player::needsM3u8Wrapper(const std::string &path) {
     // Only wrap remote URLs; leave local paths alone.
     if (path.rfind("http://", 0) == 0 ||
         path.rfind("https://", 0) == 0 ||
-        path.rfind("ftp://", 0) == 0 ||
-        path.rfind("smb2://", 0) == 0) {
+        path.rfind("ftp://", 0) == 0) {
         return true;
     }
     return false;
 }
 
-// Writes a minimal M3U8 wrapper around `url` to a temp file and returns its path.
-// Returns an empty string on failure.
-std::string Player::makeM3u8Wrapper(const std::string &url) {
-    // On PS4, /data/pplay/ is writable; on other platforms /tmp works.
+std::string Player::base64Encode(const std::string &in) {
+    static const char tbl[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    int val = 0, valb = -6;
+    for (unsigned char c : in) {
+        val = (val << 8) + c;
+        valb += 8;
+        while (valb >= 0) {
+            out.push_back(tbl[(val >> valb) & 0x3F]);
+            valb -= 6;
+        }
+    }
+    if (valb > -6) out.push_back(tbl[((val << 8) >> (valb + 8)) & 0x3F]);
+    while (out.size() % 4) out.push_back('=');
+    return out;
+}
+
+// "https://user:pass@host/path" -> cleanUrl="https://host/path", user, pass
+bool Player::splitUserInfo(const std::string &in, std::string &cleanUrl,
+                          std::string &user, std::string &pass) {
+    auto schemeEnd = in.find("://");
+    if (schemeEnd == std::string::npos) return false;
+    auto at = in.find('@', schemeEnd + 3);
+    if (at == std::string::npos) return false;
+    auto slash = in.find('/', schemeEnd + 3);
+    if (slash != std::string::npos && at > slash) return false; // '@' in path
+
+    std::string userinfo = in.substr(schemeEnd + 3, at - (schemeEnd + 3));
+    auto colon = userinfo.find(':');
+    if (colon == std::string::npos) { user = userinfo; pass.clear(); }
+    else { user = userinfo.substr(0, colon); pass = userinfo.substr(colon + 1); }
+
+    cleanUrl = in.substr(0, schemeEnd + 3) + in.substr(at + 1);
+    return true;
+}
+
+// Writes an M3U8 that references the credential-free URL and appends the
+// Basic auth header to optsOut. Returns the wrapper path, or "" on failure.
+std::string Player::makeM3u8WrapperWithAuth(const std::string &url,
+                                           std::string &optsOut) {
+    std::string cleanUrl = url, user, pass;
+    if (splitUserInfo(url, cleanUrl, user, pass)) {
+        optsOut += ",http-header-fields=Authorization: Basic "
+                 + base64Encode(user + ":" + pass);
+    }
+
     const char *candidates[] = {
         "/data/pplay/tmp_wrapper.m3u8"
     };
-
-    // MPV's HLS demuxer needs the URI on its own line, with an EXTINF before it.
-    // A large EXTINF is fine; MPV probes the real duration from the stream.
     std::string content =
         "#EXTM3U\n"
         "#EXT-X-VERSION:4\n"
         "#EXT-X-TARGETDURATION:3600\n"
-        "#EXTINF:3600.0,\n" + url + "\n" +
+        "#EXTINF:3600.0,\n" + cleanUrl + "\n" +
         "#EXT-X-ENDLIST\n";
 
     for (const char *p : candidates) {
